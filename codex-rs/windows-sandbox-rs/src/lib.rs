@@ -40,6 +40,8 @@ pub use elevated_impl::run_windows_sandbox_capture as run_windows_sandbox_captur
 #[cfg(target_os = "windows")]
 pub use identity::require_logon_sandbox_creds;
 #[cfg(target_os = "windows")]
+pub use identity::sandbox_setup_is_complete;
+#[cfg(target_os = "windows")]
 pub use logging::log_note;
 #[cfg(target_os = "windows")]
 pub use logging::LOG_FILE_NAME;

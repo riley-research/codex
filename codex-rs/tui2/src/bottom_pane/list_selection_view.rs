@@ -49,6 +49,7 @@ pub(crate) struct SelectionItem {
 pub(crate) struct SelectionViewParams {
     pub title: Option<String>,
     pub subtitle: Option<String>,
+    pub footer_note: Option<Line<'static>>,
     pub footer_hint: Option<Line<'static>>,
     pub items: Vec<SelectionItem>,
     pub is_searchable: bool,
@@ -62,6 +63,7 @@ impl Default for SelectionViewParams {
         Self {
             title: None,
             subtitle: None,
+            footer_note: None,
             footer_hint: None,
             items: Vec::new(),
             is_searchable: false,
@@ -73,6 +75,7 @@ impl Default for SelectionViewParams {
 }
 
 pub(crate) struct ListSelectionView {
+    footer_note: Option<Line<'static>>,
     footer_hint: Option<Line<'static>>,
     items: Vec<SelectionItem>,
     state: ScrollState,
@@ -100,6 +103,7 @@ impl ListSelectionView {
             ]));
         }
         let mut s = Self {
+            footer_note: params.footer_note,
             footer_hint: params.footer_hint,
             items: params.items,
             state: ScrollState::new(),
@@ -391,6 +395,9 @@ impl Renderable for ListSelectionView {
         if self.is_searchable {
             height = height.saturating_add(1);
         }
+        if self.footer_note.is_some() {
+            height = height.saturating_add(1);
+        }
         if self.footer_hint.is_some() {
             height = height.saturating_add(1);
         }
@@ -402,9 +409,11 @@ impl Renderable for ListSelectionView {
             return;
         }
 
+        let footer_rows =
+            u16::from(self.footer_note.is_some()) + u16::from(self.footer_hint.is_some());
         let [content_area, footer_area] = Layout::vertical([
             Constraint::Fill(1),
-            Constraint::Length(if self.footer_hint.is_some() { 1 } else { 0 }),
+            Constraint::Length(footer_rows),
         ])
         .areas(area);
 
@@ -474,14 +483,32 @@ impl Renderable for ListSelectionView {
             );
         }
 
-        if let Some(hint) = &self.footer_hint {
-            let hint_area = Rect {
-                x: footer_area.x + 2,
-                y: footer_area.y,
-                width: footer_area.width.saturating_sub(2),
-                height: footer_area.height,
-            };
-            hint.clone().dim().render(hint_area, buf);
+        if footer_area.height > 0 {
+            let [note_area, hint_area] = Layout::vertical([
+                Constraint::Length(if self.footer_note.is_some() { 1 } else { 0 }),
+                Constraint::Length(if self.footer_hint.is_some() { 1 } else { 0 }),
+            ])
+            .areas(footer_area);
+
+            if let Some(note) = &self.footer_note {
+                let note_area = Rect {
+                    x: note_area.x + 2,
+                    y: note_area.y,
+                    width: note_area.width.saturating_sub(2),
+                    height: note_area.height,
+                };
+                note.clone().render(note_area, buf);
+            }
+
+            if let Some(hint) = &self.footer_hint {
+                let hint_area = Rect {
+                    x: hint_area.x + 2,
+                    y: hint_area.y,
+                    width: hint_area.width.saturating_sub(2),
+                    height: hint_area.height,
+                };
+                hint.clone().dim().render(hint_area, buf);
+            }
         }
     }
 }
