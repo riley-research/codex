@@ -1199,7 +1199,8 @@ impl ChatComposer {
                     && let Some((_n, cmd)) = built_in_slash_commands()
                         .into_iter()
                         .filter(|(_, cmd)| {
-                            windows_degraded_sandbox_active() || *cmd != SlashCommand::ElevateSandbox
+                            windows_degraded_sandbox_active()
+                                || *cmd != SlashCommand::ElevateSandbox
                         })
                         .find(|(n, _)| *n == name)
                 {
