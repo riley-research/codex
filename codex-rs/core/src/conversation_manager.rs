@@ -330,7 +330,7 @@ mod tests {
         ResponseItem::Message {
             id: None,
             role: "user".to_string(),
-            content: vec![ContentItem::OutputText {
+            content: vec![ContentItem::InputText {
                 text: text.to_string(),
             }],
         }
