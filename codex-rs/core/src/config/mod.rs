@@ -65,6 +65,7 @@ pub mod types;
 pub use constraint::Constrained;
 pub use constraint::ConstraintError;
 pub use constraint::ConstraintResult;
+pub use constraint::RequirementSourceDisplay;
 
 pub use service::ConfigService;
 pub use service::ConfigServiceError;

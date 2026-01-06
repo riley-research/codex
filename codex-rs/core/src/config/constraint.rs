@@ -1,22 +1,71 @@
 use std::fmt;
 use std::sync::Arc;
 
+use crate::config_loader::RequirementSource;
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConstraintError {
-    #[error("value `{candidate}` is not in the allowed set {allowed}")]
-    InvalidValue { candidate: String, allowed: String },
+    #[error(
+        "invalid value for `{field_name}`: `{candidate}` is not in the allowed set {allowed} (allowed by {requirement_source})"
+    )]
+    InvalidValue {
+        field_name: &'static str,
+        candidate: String,
+        allowed: String,
+        requirement_source: RequirementSourceDisplay,
+    },
 
     #[error("field `{field_name}` cannot be empty")]
     EmptyField { field_name: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequirementSourceDisplay(pub Option<RequirementSource>);
+
+impl fmt::Display for RequirementSourceDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Some(source) => write!(f, "{source}"),
+            None => write!(f, "<unspecified>"),
+        }
+    }
+}
+
 impl ConstraintError {
     pub fn invalid_value(candidate: impl Into<String>, allowed: impl Into<String>) -> Self {
         Self::InvalidValue {
+            field_name: "<unknown>",
             candidate: candidate.into(),
             allowed: allowed.into(),
+            requirement_source: RequirementSourceDisplay(None),
+        }
+    }
+
+    pub fn invalid_value_for_field(
+        field_name: &'static str,
+        candidate: impl Into<String>,
+        allowed: impl Into<String>,
+    ) -> Self {
+        Self::InvalidValue {
+            field_name,
+            candidate: candidate.into(),
+            allowed: allowed.into(),
+            requirement_source: RequirementSourceDisplay(None),
+        }
+    }
+
+    pub fn invalid_value_for_field_with_source(
+        field_name: &'static str,
+        candidate: impl Into<String>,
+        allowed: impl Into<String>,
+        requirement_source: Option<RequirementSource>,
+    ) -> Self {
+        Self::InvalidValue {
+            field_name,
+            candidate: candidate.into(),
+            allowed: allowed.into(),
+            requirement_source: RequirementSourceDisplay(requirement_source),
         }
     }
 

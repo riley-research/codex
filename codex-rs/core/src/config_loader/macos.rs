@@ -1,4 +1,5 @@
 use super::config_requirements::ConfigRequirementsToml;
+use super::config_requirements::RequirementSource;
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use core_foundation::base::TCFType;
@@ -12,6 +13,13 @@ use toml::Value as TomlValue;
 const MANAGED_PREFERENCES_APPLICATION_ID: &str = "com.openai.codex";
 const MANAGED_PREFERENCES_CONFIG_KEY: &str = "config_toml_base64";
 const MANAGED_PREFERENCES_REQUIREMENTS_KEY: &str = "requirements_toml_base64";
+
+pub(super) fn managed_preferences_requirements_source() -> RequirementSource {
+    RequirementSource::MdmManagedPreferences {
+        domain: MANAGED_PREFERENCES_APPLICATION_ID.to_string(),
+        key: MANAGED_PREFERENCES_REQUIREMENTS_KEY.to_string(),
+    }
+}
 
 pub(crate) async fn load_managed_admin_config_layer(
     override_base64: Option<&str>,
@@ -47,24 +55,19 @@ fn load_managed_admin_config() -> io::Result<Option<TomlValue>> {
 }
 
 pub(crate) async fn load_managed_admin_requirements_toml(
-    target: &mut ConfigRequirementsToml,
     override_base64: Option<&str>,
-) -> io::Result<()> {
+) -> io::Result<Option<ConfigRequirementsToml>> {
     if let Some(encoded) = override_base64 {
         let trimmed = encoded.trim();
-        if !trimmed.is_empty() {
-            target.merge_unset_fields(parse_managed_requirements_base64(trimmed)?);
-        }
-        return Ok(());
+        return if trimmed.is_empty() {
+            Ok(None)
+        } else {
+            parse_managed_requirements_base64(trimmed).map(Some)
+        };
     }
 
     match task::spawn_blocking(load_managed_admin_requirements).await {
-        Ok(result) => {
-            if let Some(requirements) = result? {
-                target.merge_unset_fields(requirements);
-            }
-            Ok(())
-        }
+        Ok(result) => result,
         Err(join_err) => {
             if join_err.is_cancelled() {
                 tracing::error!("Managed requirements load task was cancelled");

@@ -13,6 +13,7 @@ mod tests;
 use crate::config::CONFIG_TOML_FILE;
 use crate::config::ConfigToml;
 use crate::config_loader::config_requirements::ConfigRequirementsToml;
+use crate::config_loader::config_requirements::ProvenanceTrackingConfigRequirementsToml;
 use crate::config_loader::layer_io::LoadedConfigLayers;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_protocol::config_types::SandboxMode;
@@ -25,6 +26,7 @@ use std::path::Path;
 use toml::Value as TomlValue;
 
 pub use config_requirements::ConfigRequirements;
+pub use config_requirements::RequirementSource;
 pub use merge::merge_toml_values;
 pub use state::ConfigLayerEntry;
 pub use state::ConfigLayerStack;
@@ -76,24 +78,27 @@ pub async fn load_config_layers_state(
     cli_overrides: &[(String, TomlValue)],
     overrides: LoaderOverrides,
 ) -> io::Result<ConfigLayerStack> {
-    let mut config_requirements_toml = ConfigRequirementsToml::default();
+    let mut config_requirements_toml = ProvenanceTrackingConfigRequirementsToml::default();
 
     #[cfg(target_os = "macos")]
-    macos::load_managed_admin_requirements_toml(
-        &mut config_requirements_toml,
+    if let Some(requirements) = macos::load_managed_admin_requirements_toml(
         overrides
             .macos_managed_config_requirements_base64
             .as_deref(),
     )
-    .await?;
+    .await?
+    {
+        config_requirements_toml.merge_unset_fields(
+            macos::managed_preferences_requirements_source(),
+            requirements,
+        );
+    }
 
     // Honor /etc/codex/requirements.toml.
     if cfg!(unix) {
-        load_requirements_toml(
-            &mut config_requirements_toml,
-            DEFAULT_REQUIREMENTS_TOML_FILE_UNIX,
-        )
-        .await?;
+        let requirements_file =
+            AbsolutePathBuf::from_absolute_path(DEFAULT_REQUIREMENTS_TOML_FILE_UNIX)?;
+        load_requirements_toml(&mut config_requirements_toml, &requirements_file).await?;
     }
 
     // Make a best-effort to support the legacy `managed_config.toml` as a
@@ -253,10 +258,10 @@ async fn load_config_toml_for_required_layer(
 /// If available, apply requirements from `/etc/codex/requirements.toml` to
 /// `config_requirements_toml` by filling in any unset fields.
 async fn load_requirements_toml(
-    config_requirements_toml: &mut ConfigRequirementsToml,
-    requirements_toml_file: impl AsRef<Path>,
+    config_requirements_toml: &mut ProvenanceTrackingConfigRequirementsToml,
+    requirements_toml_file: &AbsolutePathBuf,
 ) -> io::Result<()> {
-    match tokio::fs::read_to_string(&requirements_toml_file).await {
+    match tokio::fs::read_to_string(requirements_toml_file.as_path()).await {
         Ok(contents) => {
             let requirements_config: ConfigRequirementsToml =
                 toml::from_str(&contents).map_err(|e| {
@@ -264,11 +269,16 @@ async fn load_requirements_toml(
                         io::ErrorKind::InvalidData,
                         format!(
                             "Error parsing requirements file {}: {e}",
-                            requirements_toml_file.as_ref().display(),
+                            requirements_toml_file.as_path().display(),
                         ),
                     )
                 })?;
-            config_requirements_toml.merge_unset_fields(requirements_config);
+            config_requirements_toml.merge_unset_fields(
+                RequirementSource::SystemRequirementsToml {
+                    file: requirements_toml_file.clone(),
+                },
+                requirements_config,
+            );
         }
         Err(e) => {
             if e.kind() != io::ErrorKind::NotFound {
@@ -276,7 +286,7 @@ async fn load_requirements_toml(
                     e.kind(),
                     format!(
                         "Failed to read requirements file {}: {e}",
-                        requirements_toml_file.as_ref().display(),
+                        requirements_toml_file.as_path().display(),
                     ),
                 ));
             }
@@ -287,7 +297,7 @@ async fn load_requirements_toml(
 }
 
 async fn load_requirements_from_legacy_scheme(
-    config_requirements_toml: &mut ConfigRequirementsToml,
+    config_requirements_toml: &mut ProvenanceTrackingConfigRequirementsToml,
     loaded_config_layers: LoadedConfigLayers,
 ) -> io::Result<()> {
     // In this implementation, earlier layers cannot be overwritten by later
@@ -297,12 +307,16 @@ async fn load_requirements_from_legacy_scheme(
         managed_config,
         managed_config_from_mdm,
     } = loaded_config_layers;
-    for config in [
-        managed_config_from_mdm,
-        managed_config.map(|c| c.managed_config),
-    ]
-    .into_iter()
-    .flatten()
+
+    for (source, config) in managed_config_from_mdm
+        .map(|config| (RequirementSource::LegacyManagedConfigTomlFromMdm, config))
+        .into_iter()
+        .chain(managed_config.map(|c| {
+            (
+                RequirementSource::LegacyManagedConfigTomlFromFile { file: c.file },
+                c.managed_config,
+            )
+        }))
     {
         let legacy_config: LegacyManagedConfigToml =
             config.try_into().map_err(|err: toml::de::Error| {
@@ -313,7 +327,7 @@ async fn load_requirements_from_legacy_scheme(
             })?;
 
         let new_requirements_toml = ConfigRequirementsToml::from(legacy_config);
-        config_requirements_toml.merge_unset_fields(new_requirements_toml);
+        config_requirements_toml.merge_unset_fields(source, new_requirements_toml);
     }
 
     Ok(())

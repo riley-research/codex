@@ -1,10 +1,39 @@
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
+use std::fmt;
 
 use crate::config::Constrained;
 use crate::config::ConstraintError;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequirementSource {
+    MdmManagedPreferences { domain: String, key: String },
+    SystemRequirementsToml { file: AbsolutePathBuf },
+    LegacyManagedConfigTomlFromFile { file: AbsolutePathBuf },
+    LegacyManagedConfigTomlFromMdm,
+}
+
+impl fmt::Display for RequirementSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RequirementSource::MdmManagedPreferences { domain, key } => {
+                write!(f, "MDM managed preferences {domain}:{key}")
+            }
+            RequirementSource::SystemRequirementsToml { file } => {
+                write!(f, "{}", file.as_path().display())
+            }
+            RequirementSource::LegacyManagedConfigTomlFromFile { file } => {
+                write!(f, "{}", file.as_path().display())
+            }
+            RequirementSource::LegacyManagedConfigTomlFromMdm => {
+                write!(f, "MDM managed_config.toml (legacy)")
+            }
+        }
+    }
+}
 
 /// Normalized version of [`ConfigRequirementsToml`] after deserialization and
 /// normalization.
@@ -28,6 +57,46 @@ impl Default for ConfigRequirements {
 pub struct ConfigRequirementsToml {
     pub allowed_approval_policies: Option<Vec<AskForApproval>>,
     pub allowed_sandbox_modes: Option<Vec<SandboxModeRequirement>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProvenanceTrackingConfigRequirementsToml {
+    pub inner: ConfigRequirementsToml,
+    pub allowed_approval_policies_source: Option<RequirementSource>,
+    pub allowed_sandbox_modes_source: Option<RequirementSource>,
+}
+
+impl ProvenanceTrackingConfigRequirementsToml {
+    pub fn merge_unset_fields(
+        &mut self,
+        source: RequirementSource,
+        mut other: ConfigRequirementsToml,
+    ) {
+        let source = Some(source);
+
+        if self.inner.allowed_approval_policies.is_none() {
+            if let Some(value) = other.allowed_approval_policies.take() {
+                self.inner.allowed_approval_policies = Some(value);
+                self.allowed_approval_policies_source = source.clone();
+            }
+        }
+
+        if self.inner.allowed_sandbox_modes.is_none() {
+            if let Some(value) = other.allowed_sandbox_modes.take() {
+                self.inner.allowed_sandbox_modes = Some(value);
+                self.allowed_sandbox_modes_source = source;
+            }
+        }
+    }
+}
+
+impl From<ConfigRequirementsToml> for ProvenanceTrackingConfigRequirementsToml {
+    fn from(inner: ConfigRequirementsToml) -> Self {
+        Self {
+            inner,
+            ..Self::default()
+        }
+    }
 }
 
 /// Currently, `external-sandbox` is not supported in config.toml, but it is
@@ -57,41 +126,40 @@ impl From<SandboxMode> for SandboxModeRequirement {
     }
 }
 
-impl ConfigRequirementsToml {
-    /// For every field in `other` that is `Some`, if the corresponding field in
-    /// `self` is `None`, copy the value from `other` into `self`.
-    pub fn merge_unset_fields(&mut self, mut other: ConfigRequirementsToml) {
-        macro_rules! fill_missing_take {
-            ($base:expr, $other:expr, { $($field:ident),+ $(,)? }) => {
-                $(
-                    if $base.$field.is_none() {
-                        if let Some(value) = $other.$field.take() {
-                            $base.$field = Some(value);
-                        }
-                    }
-                )+
-            };
-        }
-
-        fill_missing_take!(self, other, { allowed_approval_policies, allowed_sandbox_modes });
-    }
-}
-
-impl TryFrom<ConfigRequirementsToml> for ConfigRequirements {
+impl TryFrom<ProvenanceTrackingConfigRequirementsToml> for ConfigRequirements {
     type Error = ConstraintError;
 
-    fn try_from(toml: ConfigRequirementsToml) -> Result<Self, Self::Error> {
-        let ConfigRequirementsToml {
-            allowed_approval_policies,
-            allowed_sandbox_modes,
+    fn try_from(toml: ProvenanceTrackingConfigRequirementsToml) -> Result<Self, Self::Error> {
+        let ProvenanceTrackingConfigRequirementsToml {
+            inner:
+                ConfigRequirementsToml {
+                    allowed_approval_policies,
+                    allowed_sandbox_modes,
+                },
+            allowed_approval_policies_source,
+            allowed_sandbox_modes_source,
         } = toml;
+
         let approval_policy: Constrained<AskForApproval> = match allowed_approval_policies {
             Some(policies) => {
-                if let Some(first) = policies.first() {
-                    Constrained::allow_values(*first, policies)?
-                } else {
+                let Some(initial_value) = policies.first().copied() else {
                     return Err(ConstraintError::empty_field("allowed_approval_policies"));
-                }
+                };
+
+                let allowed = format!("{policies:?}");
+                let requirement_source = allowed_approval_policies_source;
+                Constrained::new(initial_value, move |candidate| {
+                    if policies.contains(candidate) {
+                        Ok(())
+                    } else {
+                        Err(ConstraintError::invalid_value_for_field_with_source(
+                            "approval_policy",
+                            format!("{candidate:?}"),
+                            allowed.clone(),
+                            requirement_source.clone(),
+                        ))
+                    }
+                })?
             }
             None => Constrained::allow_any_from_default(),
         };
@@ -107,12 +175,16 @@ impl TryFrom<ConfigRequirementsToml> for ConfigRequirements {
         let sandbox_policy: Constrained<SandboxPolicy> = match allowed_sandbox_modes {
             Some(modes) => {
                 if !modes.contains(&SandboxModeRequirement::ReadOnly) {
-                    return Err(ConstraintError::invalid_value(
+                    return Err(ConstraintError::invalid_value_for_field_with_source(
                         "allowed_sandbox_modes",
+                        format!("{modes:?}"),
                         "must include 'read-only' to allow any SandboxPolicy",
+                        allowed_sandbox_modes_source,
                     ));
                 };
 
+                let allowed = format!("{modes:?}");
+                let requirement_source = allowed_sandbox_modes_source;
                 Constrained::new(default_sandbox_policy, move |candidate| {
                     let mode = match candidate {
                         SandboxPolicy::ReadOnly => SandboxModeRequirement::ReadOnly,
@@ -127,9 +199,11 @@ impl TryFrom<ConfigRequirementsToml> for ConfigRequirements {
                     if modes.contains(&mode) {
                         Ok(())
                     } else {
-                        Err(ConstraintError::invalid_value(
-                            format!("{candidate:?}"),
-                            format!("{modes:?}"),
+                        Err(ConstraintError::invalid_value_for_field_with_source(
+                            "sandbox_mode",
+                            format!("{mode:?}"),
+                            allowed.clone(),
+                            requirement_source.clone(),
                         ))
                     }
                 })?
@@ -143,9 +217,18 @@ impl TryFrom<ConfigRequirementsToml> for ConfigRequirements {
     }
 }
 
+impl TryFrom<ConfigRequirementsToml> for ConfigRequirements {
+    type Error = ConstraintError;
+
+    fn try_from(toml: ConfigRequirementsToml) -> Result<Self, Self::Error> {
+        ProvenanceTrackingConfigRequirementsToml::from(toml).try_into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RequirementSourceDisplay;
     use anyhow::Result;
     use codex_protocol::protocol::NetworkAccess;
     use codex_utils_absolute_path::AbsolutePathBuf;
@@ -160,27 +243,91 @@ mod tests {
             "#,
         )?;
 
-        let mut empty_target: ConfigRequirementsToml = from_str(
-            r#"
-                # intentionally left unset
-            "#,
-        )?;
-        empty_target.merge_unset_fields(source.clone());
+        let requirements_toml_file = if cfg!(windows) {
+            "C:\\etc\\codex\\requirements.toml"
+        } else {
+            "/etc/codex/requirements.toml"
+        };
+        let requirements_toml_file = AbsolutePathBuf::from_absolute_path(requirements_toml_file)?;
+        let source_location = RequirementSource::SystemRequirementsToml {
+            file: requirements_toml_file,
+        };
+
+        let mut empty_target = ProvenanceTrackingConfigRequirementsToml::default();
+        empty_target.merge_unset_fields(source_location.clone(), source.clone());
         assert_eq!(
-            empty_target.allowed_approval_policies,
+            empty_target.inner.allowed_approval_policies,
             Some(vec![AskForApproval::OnRequest])
         );
+        assert_eq!(
+            empty_target.allowed_approval_policies_source,
+            Some(source_location.clone())
+        );
 
-        let mut populated_target: ConfigRequirementsToml = from_str(
+        let existing_source = RequirementSource::LegacyManagedConfigTomlFromMdm;
+        let mut populated_target = ProvenanceTrackingConfigRequirementsToml::default();
+        let populated_requirements: ConfigRequirementsToml = from_str(
             r#"
                 allowed_approval_policies = ["never"]
             "#,
         )?;
-        populated_target.merge_unset_fields(source);
+        populated_target.merge_unset_fields(existing_source.clone(), populated_requirements);
+        populated_target.merge_unset_fields(source_location.clone(), source);
         assert_eq!(
-            populated_target.allowed_approval_policies,
+            populated_target.inner.allowed_approval_policies,
             Some(vec![AskForApproval::Never])
         );
+        assert_eq!(
+            populated_target.allowed_approval_policies_source,
+            Some(existing_source)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn constraint_error_includes_requirement_source() -> Result<()> {
+        let source: ConfigRequirementsToml = from_str(
+            r#"
+                allowed_approval_policies = ["on-request"]
+                allowed_sandbox_modes = ["read-only"]
+            "#,
+        )?;
+
+        let requirements_toml_file = if cfg!(windows) {
+            "C:\\etc\\codex\\requirements.toml"
+        } else {
+            "/etc/codex/requirements.toml"
+        };
+        let requirements_toml_file = AbsolutePathBuf::from_absolute_path(requirements_toml_file)?;
+        let source_location = RequirementSource::SystemRequirementsToml {
+            file: requirements_toml_file,
+        };
+
+        let mut target = ProvenanceTrackingConfigRequirementsToml::default();
+        target.merge_unset_fields(source_location.clone(), source);
+        let requirements = ConfigRequirements::try_from(target)?;
+
+        assert_eq!(
+            requirements.approval_policy.can_set(&AskForApproval::Never),
+            Err(ConstraintError::InvalidValue {
+                field_name: "approval_policy",
+                candidate: "Never".into(),
+                allowed: "[OnRequest]".into(),
+                requirement_source: RequirementSourceDisplay(Some(source_location.clone())),
+            })
+        );
+        assert_eq!(
+            requirements
+                .sandbox_policy
+                .can_set(&SandboxPolicy::DangerFullAccess),
+            Err(ConstraintError::InvalidValue {
+                field_name: "sandbox_mode",
+                candidate: "DangerFullAccess".into(),
+                allowed: "[ReadOnly]".into(),
+                requirement_source: RequirementSourceDisplay(Some(source_location)),
+            })
+        );
+
         Ok(())
     }
 
@@ -208,8 +355,10 @@ mod tests {
                 .approval_policy
                 .can_set(&AskForApproval::OnFailure),
             Err(ConstraintError::InvalidValue {
+                field_name: "approval_policy",
                 candidate: "OnFailure".into(),
                 allowed: "[UnlessTrusted, OnRequest]".into(),
+                requirement_source: RequirementSourceDisplay(None),
             })
         );
         assert!(
@@ -221,8 +370,10 @@ mod tests {
         assert_eq!(
             requirements.approval_policy.can_set(&AskForApproval::Never),
             Err(ConstraintError::InvalidValue {
+                field_name: "approval_policy",
                 candidate: "Never".into(),
                 allowed: "[UnlessTrusted, OnRequest]".into(),
+                requirement_source: RequirementSourceDisplay(None),
             })
         );
         assert!(
@@ -266,8 +417,10 @@ mod tests {
                 .sandbox_policy
                 .can_set(&SandboxPolicy::DangerFullAccess),
             Err(ConstraintError::InvalidValue {
+                field_name: "sandbox_mode",
                 candidate: "DangerFullAccess".into(),
                 allowed: "[ReadOnly, WorkspaceWrite]".into(),
+                requirement_source: RequirementSourceDisplay(None),
             })
         );
         assert_eq!(
@@ -277,8 +430,10 @@ mod tests {
                     network_access: NetworkAccess::Restricted,
                 }),
             Err(ConstraintError::InvalidValue {
-                candidate: "ExternalSandbox { network_access: Restricted }".into(),
+                field_name: "sandbox_mode",
+                candidate: "ExternalSandbox".into(),
                 allowed: "[ReadOnly, WorkspaceWrite]".into(),
+                requirement_source: RequirementSourceDisplay(None),
             })
         );
 

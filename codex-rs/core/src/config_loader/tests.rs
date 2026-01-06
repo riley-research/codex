@@ -5,7 +5,7 @@ use crate::config::ConfigBuilder;
 use crate::config::ConfigOverrides;
 use crate::config_loader::ConfigLayerEntry;
 use crate::config_loader::ConfigRequirements;
-use crate::config_loader::config_requirements::ConfigRequirementsToml;
+use crate::config_loader::config_requirements::ProvenanceTrackingConfigRequirementsToml;
 use crate::config_loader::fingerprint::version_for_toml;
 use crate::config_loader::load_requirements_toml;
 use codex_protocol::protocol::AskForApproval;
@@ -315,11 +315,12 @@ allowed_approval_policies = ["never", "on-request"]
     )
     .await?;
 
-    let mut config_requirements_toml = ConfigRequirementsToml::default();
+    let requirements_file = AbsolutePathBuf::from_absolute_path(&requirements_file)?;
+    let mut config_requirements_toml = ProvenanceTrackingConfigRequirementsToml::default();
     load_requirements_toml(&mut config_requirements_toml, &requirements_file).await?;
 
     assert_eq!(
-        config_requirements_toml.allowed_approval_policies,
+        config_requirements_toml.inner.allowed_approval_policies,
         Some(vec![AskForApproval::Never, AskForApproval::OnRequest])
     );
 
