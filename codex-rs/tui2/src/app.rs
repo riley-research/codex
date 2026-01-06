@@ -1636,7 +1636,7 @@ impl App {
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
-                    let _ = (preset, mode);
+                    let _ = preset;
                 }
             }
             AppEvent::EnableWindowsSandboxForAgentMode { preset, mode } => {
